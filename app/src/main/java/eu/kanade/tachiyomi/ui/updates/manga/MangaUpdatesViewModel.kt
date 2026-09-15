@@ -237,7 +237,9 @@ class MangaUpdatesViewModel(
     }
 
     fun updateLibrary(): Boolean {
-        val started = MangaLibraryUpdateJob.startNow(context)
+        // An explicit refresh from Updates should check every library title, just like a
+        // manual refresh from a title screen, instead of applying scheduled-update skips.
+        val started = MangaLibraryUpdateJob.startNow(context, forceAll = true)
         viewModelScope.launch {
             _events.send(Event.LibraryUpdateTriggered(started))
         }
