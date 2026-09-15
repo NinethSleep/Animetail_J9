@@ -18,7 +18,7 @@ android {
     namespace = "eu.kanade.tachiyomi"
 
     defaultConfig {
-        applicationId = "com.dark.animetailv2"
+        applicationId = "com.ninethsleep.animetailj9"
 
         versionCode = 143
         versionName = "0.20.4.0"
