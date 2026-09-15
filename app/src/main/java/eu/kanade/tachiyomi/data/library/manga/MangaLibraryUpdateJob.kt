@@ -144,18 +144,18 @@ class MangaLibraryUpdateJob(private val context: Context, workerParams: WorkerPa
             logcat(LogPriority.ERROR, e) { "Not allowed to set foreground job" }
         }
 
-        libraryPreferences.lastUpdatedTimestamp.set(Clock.System.now().toEpochMilliseconds())
-
         val categoryId = inputData.getLong(KEY_CATEGORY, -1L)
+        val forceAll = inputData.getBoolean(KEY_FORCE_ALL, false)
         // SY -->
         val group = inputData.getInt(KEY_GROUP, MangaLibraryGroup.BY_DEFAULT)
         val groupExtra = inputData.getString(KEY_GROUP_EXTRA)
         // SY <--
-        addMangaToQueue(categoryId, group, groupExtra)
+        addMangaToQueue(categoryId, group, groupExtra, forceAll)
 
         return withIOContext {
             try {
-                updateChapterList()
+                updateChapterList(manualFetch = forceAll)
+                libraryPreferences.lastUpdatedTimestamp.set(Clock.System.now().toEpochMilliseconds())
                 Result.success()
             } catch (e: Exception) {
                 if (e is CancellationException) {
@@ -187,16 +187,24 @@ class MangaLibraryUpdateJob(private val context: Context, workerParams: WorkerPa
      * Adds list of manga to be updated.
      *
      * @param categoryId the ID of the category to update, or -1 if no category specified.
+     * @param forceAll whether to bypass scheduled-update filters for an explicit Updates refresh.
      */
     @Suppress("MagicNumber", "LongMethod", "CyclomaticComplexMethod", "ComplexCondition")
-    private suspend fun addMangaToQueue(categoryId: Long, group: Int, groupExtra: String?) {
+    private suspend fun addMangaToQueue(
+        categoryId: Long,
+        group: Int,
+        groupExtra: String?,
+        forceAll: Boolean,
+    ) {
         val libraryManga = getLibraryManga.await()
 
         // SY -->
         val groupMangaLibraryUpdateType = libraryPreferences.groupMangaLibraryUpdateType.get()
         // SY <--
 
-        val listToUpdate = if (categoryId != -1L) {
+        val listToUpdate = if (forceAll) {
+            libraryManga
+        } else if (categoryId != -1L) {
             libraryManga.filter { it.category == categoryId }
         } else if (
             group == MangaLibraryGroup.BY_DEFAULT ||
@@ -282,6 +290,8 @@ class MangaLibraryUpdateJob(private val context: Context, workerParams: WorkerPa
             // SY <--
             .filter {
                 when {
+                    forceAll -> true
+
                     it.manga.updateStrategy != UpdateStrategy.ALWAYS_UPDATE -> {
                         skippedUpdates.add(
                             it.manga to context.stringResource(MR.strings.skipped_reason_not_always_update),
@@ -351,7 +361,7 @@ class MangaLibraryUpdateJob(private val context: Context, workerParams: WorkerPa
      * @return an observable delivering the progress of each update.
      */
     @Suppress("MagicNumber", "LongMethod")
-    private suspend fun updateChapterList() {
+    private suspend fun updateChapterList(manualFetch: Boolean = false) {
         val semaphore = Semaphore(5)
         val progressCount = AtomicInteger(0)
         val currentlyUpdatingManga = CopyOnWriteArrayList<Manga>()
@@ -381,7 +391,7 @@ class MangaLibraryUpdateJob(private val context: Context, workerParams: WorkerPa
                                     manga,
                                 ) {
                                     try {
-                                        val newChapters = updateManga(manga, fetchWindow)
+                                        val newChapters = updateManga(manga, fetchWindow, manualFetch)
                                             .sortedByDescending { it.sourceOrder }
 
                                         if (newChapters.isNotEmpty()) {
@@ -447,9 +457,14 @@ class MangaLibraryUpdateJob(private val context: Context, workerParams: WorkerPa
      * Updates the chapters    for the given manga and adds them to the database.
      *
      * @param manga the manga to update.
+     * @param manualFetch whether this refresh was explicitly requested by the user.
      * @return a pair of the inserted and removed chapters.
      */
-    private suspend fun updateManga(manga: Manga, fetchWindow: Pair<Long, Long>): List<Chapter> {
+    private suspend fun updateManga(
+        manga: Manga,
+        fetchWindow: Pair<Long, Long>,
+        manualFetch: Boolean,
+    ): List<Chapter> {
         val source = sourceManager.getOrStub(manga.source)
         val currentChapters = getChaptersByMangaId.await(manga.id).map { it.toSChapter() }
 
@@ -460,13 +475,13 @@ class MangaLibraryUpdateJob(private val context: Context, workerParams: WorkerPa
             fetchChapters = true,
         )
 
-        updateManga.awaitUpdateFromSource(manga, mangaUpdate.manga, manualFetch = false, coverCache)
+        updateManga.awaitUpdateFromSource(manga, mangaUpdate.manga, manualFetch, coverCache)
 
         // Get manga from database to account for if it was removed during the update and
         // to get latest data so it doesn't get overwritten later on
         val dbManga = getManga.await(manga.id)?.takeIf { it.favorite } ?: return emptyList()
 
-        return syncChaptersWithSource.await(mangaUpdate.chapters, dbManga, source, false, fetchWindow)
+        return syncChaptersWithSource.await(mangaUpdate.chapters, dbManga, source, manualFetch, fetchWindow)
     }
 
     private suspend fun withUpdateNotification(
@@ -541,6 +556,7 @@ class MangaLibraryUpdateJob(private val context: Context, workerParams: WorkerPa
          * Key for category to update.
          */
         private const val KEY_CATEGORY = "category"
+        private const val KEY_FORCE_ALL = "force_all"
         // SY -->
 
         /**
@@ -609,6 +625,7 @@ class MangaLibraryUpdateJob(private val context: Context, workerParams: WorkerPa
         fun startNow(
             context: Context,
             category: Category? = null,
+            forceAll: Boolean = false,
             // SY -->
             group: Int = MangaLibraryGroup.BY_DEFAULT,
             groupExtra: String? = null,
@@ -623,6 +640,7 @@ class MangaLibraryUpdateJob(private val context: Context, workerParams: WorkerPa
 
             val inputData = workDataOf(
                 KEY_CATEGORY to category?.id,
+                KEY_FORCE_ALL to forceAll,
                 // SY -->
                 KEY_GROUP to group,
                 KEY_GROUP_EXTRA to groupExtra,
