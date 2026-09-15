@@ -1,4 +1,4 @@
-name: Build installable APK
+name: Build signed Animetail J9 APK
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   build:
-    name: Build ARM64 debug APK
+    name: Build signed ARM64 APK
     runs-on: ubuntu-24.04
     timeout-minutes: 60
 
@@ -25,13 +25,45 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
 
-      - name: Build debug APK
-        run: ./gradlew assembleDebug
+      - name: Build unsigned release APK
+        run: ./gradlew assembleRelease
 
-      - name: Upload installable ARM64 APK
+      - name: Sign and verify ARM64 APK
+        env:
+          KEYSTORE_BASE64: ${{ secrets.FORK_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.FORK_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.FORK_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.FORK_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          unsigned_apk="app/build/outputs/apk/release/app-arm64-v8a-release-unsigned.apk"
+          aligned_apk="${RUNNER_TEMP}/animetail-j9-arm64-v8a-aligned.apk"
+          signed_apk="app/build/outputs/apk/release/animetail-j9-arm64-v8a.apk"
+          keystore="${RUNNER_TEMP}/animetail-j9.p12"
+          build_tools_dir="$(find "${ANDROID_HOME}/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+
+          test -s "$unsigned_apk"
+          test -n "$build_tools_dir"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$keystore"
+
+          "$build_tools_dir/zipalign" -f -p 4 "$unsigned_apk" "$aligned_apk"
+          "$build_tools_dir/apksigner" sign \
+            --ks "$keystore" \
+            --ks-type PKCS12 \
+            --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass env:KEYSTORE_PASSWORD \
+            --key-pass env:KEY_PASSWORD \
+            --out "$signed_apk" \
+            "$aligned_apk"
+
+          "$build_tools_dir/apksigner" verify --verbose "$signed_apk"
+          rm -f "$keystore" "$aligned_apk"
+
+      - name: Upload installable APK
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: animetail-j9-arm64-debug-${{ github.sha }}
-          path: app/build/outputs/apk/debug/*arm64-v8a*debug*.apk
+          name: animetail-j9-arm64-${{ github.sha }}
+          path: app/build/outputs/apk/release/animetail-j9-arm64-v8a.apk
           if-no-files-found: error
           retention-days: 14
